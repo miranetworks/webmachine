@@ -20,6 +20,7 @@
 -module(webmachine_util).
 -export([guess_mime/1]).
 -export([convert_request_date/1, compare_ims_dates/2]).
+-export([rfc1123_date/1]).
 -export([choose_media_type/2, format_content_type/1]).
 -export([choose_charset/2]).
 -export([choose_encoding/2]).
@@ -27,6 +28,7 @@
 -export([media_type_to_detail/1,
          quoted_string/1,
          split_quoted_strings/1]).
+-export([parse_range/2]).
 
 -ifdef(TEST).
 -ifdef(EQC).
@@ -50,6 +52,13 @@ compare_ims_dates(D1, D2) ->
     GD1 = calendar:datetime_to_gregorian_seconds(D1),
     GD2 = calendar:datetime_to_gregorian_seconds(D2),
     GD1 > GD2.
+
+%% @doc Convert tuple style GMT datetime to RFC1123 style one
+rfc1123_date({{YYYY, MM, DD}, {Hour, Min, Sec}}) ->
+    DayNumber = calendar:day_of_the_week({YYYY, MM, DD}),
+    lists:flatten(io_lib:format("~s, ~2.2.0w ~3.s ~4.4.0w ~2.2.0w:~2.2.0w:~2.2.0w GMT",
+                                [httpd_util:day(DayNumber), DD, httpd_util:month(MM),
+                                 YYYY, Hour, Min, Sec])).
 
 %% @spec guess_mime(string()) -> string()
 %% @doc  Guess the mime type of a file by the extension of its filename.
@@ -77,6 +86,8 @@ guess_mime(File) ->
             "image/jpeg";
         ".js" ->
             "application/x-javascript";
+        ".less" ->
+            "text/css";
         ".m4v" ->
             "video/mp4";
         ".manifest" ->
@@ -365,10 +376,29 @@ unescape_quoted_string([Char | Rest], Acc) ->
 
 %% @doc  Compute the difference between two now() tuples, in milliseconds.
 %% @spec now_diff_milliseconds(now(), now()) -> integer()
+now_diff_milliseconds(undefined, undefined) ->
+    0;
+now_diff_milliseconds(undefined, T2) ->
+    now_diff_milliseconds(os:timestamp(), T2);
 now_diff_milliseconds({M,S,U}, {M,S1,U1}) ->
     ((S-S1) * 1000) + ((U-U1) div 1000);
 now_diff_milliseconds({M,S,U}, {M1,S1,U1}) ->
     ((M-M1)*1000000+(S-S1))*1000 + ((U-U1) div 1000).
+
+-spec parse_range(RawRange::string(), ResourceLength::non_neg_integer()) ->
+                         [{Start::non_neg_integer(), End::non_neg_integer()}].
+parse_range(RawRange, ResourceLength) when is_list(RawRange) ->
+    parse_range(mochiweb_http:parse_range_request(RawRange), ResourceLength, []).
+
+parse_range([], _ResourceLength, Acc) ->
+    lists:reverse(Acc);
+parse_range([Spec | Rest], ResourceLength, Acc) ->
+    case mochiweb_http:range_skip_length(Spec, ResourceLength) of
+        invalid_range ->
+            parse_range(Rest, ResourceLength, Acc);
+        {Skip, Length} ->
+            parse_range(Rest, ResourceLength, [{Skip, Skip + Length - 1} | Acc])
+    end.
 
 %%
 %% TEST
@@ -444,6 +474,10 @@ compare_ims_dates_test() ->
     Early = {{2009,12,30},{13,39,02}},
     ?assertEqual(true, compare_ims_dates(Late, Early)),
     ?assertEqual(false, compare_ims_dates(Early, Late)).
+
+rfc1123_date_test() ->
+    ?assertEqual("Thu, 11 Jul 2013 04:33:19 GMT",
+                 rfc1123_date({{2013, 7, 11}, {4, 33, 19}})).
 
 guess_mime_test() ->
     TextTypes = [".html",".css",".htc",".manifest",".txt"],

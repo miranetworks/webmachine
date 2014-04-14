@@ -24,10 +24,16 @@
 %% API
 -export([start_link/0,
          add_route/1,
+         add_route/2,
          remove_route/1,
+         remove_route/2,
          remove_resource/1,
+         remove_resource/2,
          get_routes/0,
-         init_routes/1]).
+         get_routes/1,
+         init_routes/1,
+         init_routes/2
+        ]).
 
 %% gen_server callbacks
 -export([init/1,
@@ -69,30 +75,45 @@
 %%      be the format documented here:
 %% http://bitbucket.org/justin/webmachine/wiki/DispatchConfiguration
 add_route(Route) ->
-    gen_server:call(?SERVER, {add_route, Route}, infinity).
+    add_route(default, Route).
+
+add_route(Name, Route) ->
+    gen_server:call(?SERVER, {add_route, Name, Route}, infinity).
 
 %% @spec remove_route(hostmatchterm() | pathmatchterm()) -> ok
 %% @doc Removes a route from webamchine's route table. The route
 %%      route must be properly formatted
 %% @see add_route/2
 remove_route(Route) ->
-    gen_server:call(?SERVER, {remove_route, Route}, infinity).
+    remove_route(default, Route).
+
+remove_route(Name, Route) ->
+    gen_server:call(?SERVER, {remove_route, Name, Route}, infinity).
 
 %% @spec remove_resource(atom()) -> ok
 %% @doc Removes all routes for a specific resource module.
 remove_resource(Resource) when is_atom(Resource) ->
-    gen_server:call(?SERVER, {remove_resource, Resource}, infinity).
+    remove_resource(default, Resource).
+
+remove_resource(Name, Resource) when is_atom(Resource) ->
+    gen_server:call(?SERVER, {remove_resource, Name, Resource}, infinity).
 
 %% @spec get_routes() -> [{[], res, []}]
 %% @doc Retrieve a list of routes and resources set in webmachine's
 %%      route table.
 get_routes() ->
-    get_dispatch_list().
+    get_routes(default).
+
+get_routes(Name) ->
+    get_dispatch_list(Name).
 
 %% @spec init_routes() -> ok
 %% @doc Set the default routes, unless the routing table isn't empty.
 init_routes(DefaultRoutes) ->
-    gen_server:call(?SERVER, {init_routes, DefaultRoutes}, infinity).
+    init_routes(default, DefaultRoutes).
+
+init_routes(Name, DefaultRoutes) ->
+    gen_server:call(?SERVER, {init_routes, Name, DefaultRoutes}, infinity).
 
 %% @spec start_link() -> {ok, pid()} | {error, any()}
 %% @doc Starts the webmachine_router gen_server.
@@ -110,31 +131,30 @@ start_link() ->
             %% probably crashed and this is a restart.
             ok
     end,
-
     gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
 
 %% @private
 init([]) ->
-  {ok, []}.
+    {ok, undefined}.
 
 %% @private
-handle_call({remove_resource, Resource}, _From, State) ->
-    DL = filter_by_resource(Resource, get_dispatch_list()),
-    {reply, set_dispatch_list(DL), State};
+handle_call({remove_resource, Name, Resource}, _From, State) ->
+    DL = filter_by_resource(Resource, get_dispatch_list(Name)),
+    {reply, set_dispatch_list(Name, DL), State};
 
-handle_call({remove_route, Route}, _From, State) ->
-    DL = [D || D <- get_dispatch_list(),
+handle_call({remove_route, Name, Route}, _From, State) ->
+    DL = [D || D <- get_dispatch_list(Name),
                D /= Route],
-    {reply, set_dispatch_list(DL), State};
+    {reply, set_dispatch_list(Name, DL), State};
 
-handle_call({add_route, Route}, _From, State) ->
-    DL = [Route|[D || D <- get_dispatch_list(),
+handle_call({add_route, Name, Route}, _From, State) ->
+    DL = [Route|[D || D <- get_dispatch_list(Name),
                       D /= Route]],
-    {reply, set_dispatch_list(DL), State};
+    {reply, set_dispatch_list(Name, DL), State};
 
-handle_call({init_routes, DefaultRoutes}, _From, State) ->
+handle_call({init_routes, Name, DefaultRoutes}, _From, State) ->
     %% if the table lacks a dispatch_list row, set it
-    ets:insert_new(?MODULE, {dispatch_list, DefaultRoutes}),
+    ets:insert_new(?MODULE, {Name, DefaultRoutes}),
     {reply, ok, State};
 
 handle_call(_Request, _From, State) ->
@@ -173,16 +193,16 @@ filter_by_resource(Resource) ->
             [Other|Acc]
     end.
 
-get_dispatch_list() ->
-    case ets:lookup(?MODULE, dispatch_list) of
-        [{dispatch_list, Dispatch}] ->
+get_dispatch_list(Name) ->
+    case ets:lookup(?MODULE, Name) of
+        [{Name, Dispatch}] ->
             Dispatch;
         [] ->
             []
     end.
 
-set_dispatch_list(DispatchList) ->
-    true = ets:insert(?MODULE, {dispatch_list, DispatchList}),
+set_dispatch_list(Name, DispatchList) ->
+    true = ets:insert(?MODULE, {Name, DispatchList}),
     ok.
 
 %%
@@ -191,19 +211,45 @@ set_dispatch_list(DispatchList) ->
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
 
-add_remove_route_test() ->
-    {ok, Pid} = webmachine_sup:start_link(),
-    unlink(Pid),
+webmachine_router_test_() ->
+    {setup,
+     fun() ->
+             {ok, Pid} = webmachine_router:start_link(),
+             unlink(Pid),
+             {Pid}
+     end,
+     fun({Pid}) ->
+             exit(Pid, kill),
+             wait_for_termination(webmachine_router),
+             %% the test process owns the table, so we clear it between tests
+             ets:delete(?MODULE)
+     end,
+     [{"add_remove_route", fun add_remove_route/0},
+      {"add_remove_resource", fun add_remove_resource/0},
+      {"no_dupe_path", fun no_dupe_path/0}
+      ]}.
+
+%% Wait until the given registered name cannot be found, to ensure that
+%% another test can safely start it again via start_link
+wait_for_termination(RegName) ->
+    IdOrUndefined = whereis(RegName),
+    case IdOrUndefined of
+        undefined ->
+            ok;
+        _ ->
+            timer:sleep(100),
+            wait_for_termination(RegName)
+    end.
+
+add_remove_route() ->
     PathSpec = {["foo"], foo, []},
     webmachine_router:add_route(PathSpec),
-    [PathSpec] = get_routes(),
+    ?assertEqual([PathSpec], get_routes()),
     webmachine_router:remove_route(PathSpec),
-    [] = get_routes(),
-    exit(Pid, kill).
+    ?assertEqual([], get_routes()),
+    ok.
 
-add_remove_resource_test() ->
-    {ok, Pid} = webmachine_sup:start_link(),
-    unlink(Pid),
+add_remove_resource() ->
     PathSpec1 = {["foo"], foo, []},
     PathSpec2 = {["bar"], foo, []},
     PathSpec3 = {["baz"], bar, []},
@@ -213,44 +259,47 @@ add_remove_resource_test() ->
     webmachine_router:add_route(PathSpec2),
     webmachine_router:add_route(PathSpec3),
     webmachine_router:remove_resource(foo),
-    [PathSpec3] = get_routes(),
+    ?assertEqual([PathSpec3], get_routes()),
     webmachine_router:add_route(PathSpec4),
     webmachine_router:remove_resource(foo),
-    [PathSpec3] = get_routes(),
+    ?assertEqual([PathSpec3], get_routes()),
     webmachine_router:add_route(PathSpec5),
     webmachine_router:remove_resource(foo),
-    [PathSpec3] = get_routes(),
+    ?assertEqual([PathSpec3], get_routes()),
     webmachine_router:remove_route(PathSpec3),
     [begin
          PathSpec = {"localhost", [HostPath]},
          webmachine_router:add_route(PathSpec),
          webmachine_router:remove_resource(foo),
-         [{"localhost", []}] = get_routes(),
+         ?assertEqual([{"localhost", []}], get_routes()),
          webmachine_router:remove_route({"localhost", []})
      end || HostPath <- [PathSpec1, PathSpec4, PathSpec5]],
-    exit(Pid, kill).
+    ok.
 
-no_dupe_path_test() ->
-    {ok, Pid} = webmachine_sup:start_link(),
-    unlink(Pid),
+no_dupe_path() ->
     PathSpec = {["foo"], foo, []},
     webmachine_router:add_route(PathSpec),
     webmachine_router:add_route(PathSpec),
-    [PathSpec] = get_routes(),
-    exit(Pid, kill).
+    ?assertEqual([PathSpec], get_routes()),
+    ok.
 
 supervisor_restart_keeps_routes_test() ->
-    {ok, Pid} = webmachine_sup:start_link(),
+    {ok, Pid} = webmachine_router:start_link(),
     unlink(Pid),
     PathSpec = {["foo"], foo, []},
     webmachine_router:add_route(PathSpec),
-    [PathSpec] = get_routes(),
+    ?assertEqual([PathSpec], get_routes()),
     OldRouter = whereis(webmachine_router),
+    ?assertEqual(Pid, OldRouter),
     exit(whereis(webmachine_router), kill),
     timer:sleep(100),
-    NewRouter = whereis(webmachine_router),
+    %% Note: This test is currently broken and wasn't actually testing what it
+    %% was supposed to
+    NewRouter = undefined,
     ?assert(OldRouter /= NewRouter),
-    [PathSpec] = get_routes(),
-    exit(Pid, kill).
+    ?assertEqual([PathSpec], get_routes()),
+    exit(Pid, kill),
+    ets:delete(?MODULE),
+    ok.
 
 -endif.
