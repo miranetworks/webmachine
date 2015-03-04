@@ -1,0 +1,8 @@
+#!/bin/bash
+
+. /home/ubuntu/erlang/R16B03-1/activate
+
+mkdir -p .rebar
+
+make verbosetest
+
