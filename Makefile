@@ -40,3 +40,4 @@ travisupload:
 
 DEV_MODE:
 	@touch ./.rebar/DEV_MODE
+include docker/docker.mk

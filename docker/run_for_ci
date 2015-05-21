@@ -1,0 +1,4 @@
+#!/bin/bash
+WRKDIR=`readlink -f $(pwd)`
+docker run --rm=true -i -u="developer" --name webmachine -v $(dirname $SSH_AUTH_SOCK):$(dirname $SSH_AUTH_SOCK) -e SSH_AUTH_SOCK=$SSH_AUTH_SOCK -v $(pwd)/../:/workspace/base webmachine $1
+docker rm -f webmachine 2>/dev/null  || true
